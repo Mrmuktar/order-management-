@@ -18,10 +18,10 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN = String(process.env.ADMIN_NUMBER || "").replace(/\D/g, "");
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "..", "data");
-const AUTH_DIR = path.join(DATA_DIR, "whatsapp-auth");
-const ORDERS_FILE = path.join(DATA_DIR, "orders.json");
-const LOG_FILE = path.join(DATA_DIR, "activity.json");
+let DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "..", "data");
+let AUTH_DIR;
+let ORDERS_FILE;
+let LOG_FILE;
 const logger = pino({ level: process.env.LOG_LEVEL || "info" });
 
 let sock;
@@ -31,11 +31,42 @@ let pairingMessage = "সার্ভার চালু হচ্ছে…";
 let reconnectTimer;
 
 function ensureStorage() {
-  // Create only inside the configured writable data directory.
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  // Render Disk mount points must be created in the Render dashboard, not by the app.
+  // Verify the configured mount is already present and writable. If it is missing
+  // (for example, a Free instance or an unattached Disk), use /tmp so the service
+  // can still boot instead of crashing with EACCES. /tmp is ephemeral.
+  const configured = process.env.DATA_DIR;
+  const localDefault = path.join(__dirname, "..", "data");
+  const candidates = configured ? [configured, "/tmp/babyworld-bd-data"] : [localDefault, "/tmp/babyworld-bd-data"];
+  let selected = null;
+  let lastError = null;
+
+  for (const candidate of candidates) {
+    try {
+      if (configured && candidate === configured) {
+        // Do not attempt to create a missing Render mount point.
+        fs.accessSync(candidate, fs.constants.W_OK);
+      } else {
+        fs.mkdirSync(candidate, { recursive: true });
+        fs.accessSync(candidate, fs.constants.W_OK);
+      }
+      selected = candidate;
+      break;
+    } catch (err) {
+      lastError = err;
+      logger.warn({ path: candidate, code: err.code }, "Storage path unavailable; trying fallback");
+    }
+  }
+
+  if (!selected) throw new Error(`No writable storage directory found: ${lastError?.message || "unknown error"}`);
+  DATA_DIR = selected;
+  AUTH_DIR = path.join(DATA_DIR, "whatsapp-auth");
+  ORDERS_FILE = path.join(DATA_DIR, "orders.json");
+  LOG_FILE = path.join(DATA_DIR, "activity.json");
   fs.mkdirSync(AUTH_DIR, { recursive: true });
   if (!fs.existsSync(ORDERS_FILE)) fs.writeFileSync(ORDERS_FILE, "[]");
   if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "[]");
+  logger.info({ dataDir: DATA_DIR, persistent: configured ? DATA_DIR === configured : false }, "Storage initialized");
 }
 function readJSON(file, fallback = []) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
